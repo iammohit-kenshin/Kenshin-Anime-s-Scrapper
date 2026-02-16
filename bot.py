@@ -84,8 +84,7 @@ class MangaSearcher:
         if not self.session:
             self.session = aiohttp.ClientSession(headers=self.headers)
         return self.session
-    
-    async def search_elftoon_direct(self, url: str) -> Dict:
+async def search_elftoon_direct(self, url: str) -> Dict:
     """ULTIMATE FIX - Multiple methods se chapters dhundo"""
     try:
         session = await self.get_session()
@@ -102,7 +101,7 @@ class MangaSearcher:
             # ========== CHAPTER EXTRACTION ==========
             chapters = []
             
-            # Method 1: Direct chapter links (Sabse common)
+            # Method 1: Direct chapter links
             chapter_selectors = [
                 'li.wp-manga-chapter a',
                 '.chapter-list a',
@@ -129,13 +128,12 @@ class MangaSearcher:
                     print(f"Method 1 se mile: {len(chapters)} chapters")
                     break
             
-            # Method 2: Look in script tags for JSON data
+            # Method 2: Look in script tags
             if not chapters:
                 import re
                 scripts = soup.find_all('script')
                 for script in scripts:
                     if script.string:
-                        # Find all URLs containing 'chapter'
                         urls = re.findall(r'https?://[^\s"\']*chapter[^\s"\']*', script.string)
                         for url in urls[:50]:
                             if url not in [c['url'] for c in chapters]:
@@ -147,39 +145,6 @@ class MangaSearcher:
                             print(f"Method 2 se mile: {len(urls)} chapters")
                             break
             
-            # Method 3: Look for numeric patterns in links
-            if not chapters:
-                all_links = soup.find_all('a', href=True)
-                for link in all_links:
-                    href = link['href']
-                    # Check if href contains numbers (likely chapters)
-                    if re.search(r'/\d+/?$', href) or re.search(r'chapter-\d+', href.lower()):
-                        if 'manga' not in href and 'wp-content' not in href:
-                            full_url = href if href.startswith('http') else 'https://elftoon.com' + href
-                            if full_url not in [c['url'] for c in chapters]:
-                                chapters.append({
-                                    'url': full_url,
-                                    'title': link.text.strip() or "Chapter"
-                                })
-                if chapters:
-                    print(f"Method 3 se mile: {len(chapters)} chapters")
-            
-            # Method 4: Look in any div with chapter class
-            if not chapters:
-                chapter_divs = soup.select('div[class*="chapter"], ul[class*="chapter"]')
-                for div in chapter_divs:
-                    links = div.find_all('a', href=True)
-                    for link in links:
-                        href = link['href']
-                        full_url = href if href.startswith('http') else 'https://elftoon.com' + href
-                        if full_url not in [c['url'] for c in chapters]:
-                            chapters.append({
-                                'url': full_url,
-                                'title': link.text.strip() or "Chapter"
-                            })
-                if chapters:
-                    print(f"Method 4 se mile: {len(chapters)} chapters")
-            
             # Process chapters - remove duplicates
             unique_chapters = []
             seen_urls = set()
@@ -190,18 +155,13 @@ class MangaSearcher:
                     unique_chapters.append(chap)
             
             # Sort and number
-            unique_chapters = unique_chapters[::-1]  # Reverse to get chapter 1 first
+            unique_chapters = unique_chapters[::-1]
             for i, chap in enumerate(unique_chapters, 1):
                 chap['number'] = i
                 if chap['title'] == "Chapter" or not chap['title']:
                     chap['title'] = f"Chapter {i}"
             
             print(f"✅ Total {len(unique_chapters)} chapters found for {title}")
-            
-            if not unique_chapters:
-                print("❌ KOI CHAPTER NAHI MILA!")
-                # Debug: Print page structure
-                print("Page title:", soup.title.string if soup.title else "No title")
             
             return {
                 'title': title,
