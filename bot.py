@@ -11,11 +11,12 @@ from telegram.constants import ParseMode
 import uuid
 import time
 
+# Import all modules
 from config import Config
 from plugins.search import MangaSearcher
 from plugins.pdf_engine import PDFEngine
-from plugins.simple_queue import SimpleQueue  # 👈 Redis nahi, ye use karo
-from utils.file_manager import FileManager
+from plugins.simple_queue import SimpleQueue
+from utils.file_manager import FileManager  # <-- Ab ye milega
 
 # Logging setup
 logging.basicConfig(
@@ -26,15 +27,15 @@ logger = logging.getLogger(__name__)
 
 class MangaVerseBot:
     def __init__(self):
+        print("🤖 Initializing bot...")
         self.searcher = MangaSearcher()
         self.pdf_engine = PDFEngine()
-        # 👇 Simple in-memory queue - no Redis!
-        self.queue = SimpleQueue(expiry=3600)  
+        self.queue = SimpleQueue(expiry=3600)
         self.file_manager = FileManager()
-        
-        # User sessions (temporary, auto-clean)
         self.user_sessions = {}
-        self.last_request = {}  # For rate limiting
+        self.last_request = {}
+        self.downloader = self.file_manager  # For backward compatibility
+        print("✅ Bot initialized!")
     
     def check_rate_limit(self, user_id: int) -> bool:
         """Simple rate limiting"""
@@ -52,7 +53,10 @@ class MangaVerseBot:
             f"👋 Namaste {user.first_name}!\n\n"
             f"Main Manga Bot hoon. Bas manga ka naam bhejo, "
             f"main dhundh kar PDF bhej dunga!\n\n"
-            f"Example: 'One Piece' ya 'Solo Leveling'"
+            f"Example: 'One Piece' ya 'Solo Leveling'\n\n"
+            f"Commands:\n"
+            f"/queue - Check your queue\n"
+            f"/cancel - Cancel current operation"
         )
     
     async def handle_manga_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -81,7 +85,7 @@ class MangaVerseBot:
                 return
             
             # Store in session
-            session_id = str(uuid.uuid4())
+            session_id = str(uuid.uuid4())[:8]
             self.user_sessions[user_id] = {
                 'session_id': session_id,
                 'results': results,
@@ -171,6 +175,13 @@ class MangaVerseBot:
             row.append(InlineKeyboardButton(str(i), callback_data=f"chap_{i}"))
         keyboard.append(row)
         
+        # Next 5 chapters if available
+        if session['total'] > 5:
+            row2 = []
+            for i in range(6, min(11, session['total']+1)):
+                row2.append(InlineKeyboardButton(str(i), callback_data=f"chap_{i}"))
+            keyboard.append(row2)
+        
         # More options
         keyboard.extend([
             [InlineKeyboardButton("📦 Download All", callback_data="chap_all")],
@@ -181,9 +192,10 @@ class MangaVerseBot:
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"📚 {session['selected']['title']}\n"
+            f"📚 *{session['selected']['title']}*\n"
             f"Total: {session['total']} chapters\n\n"
             f"Select chapter:",
+            parse_mode=ParseMode.MARKDOWN,
             reply_markup=reply_markup
         )
     
@@ -203,7 +215,7 @@ class MangaVerseBot:
             user_id=user_id,
             manga=session['selected'],
             chapter=chapter_num,
-            settings={}  # Add settings if needed
+            settings={}
         )
         
         if not job_id:
@@ -274,37 +286,65 @@ class MangaVerseBot:
         user_id = job['user_id']
         
         try:
+            # Update status
+            self.queue.update_job(job_id, 'processing', progress=10)
+            
             # Get chapter images
-            chapter_url = job['manga']['chapters'][job['chapter']-1]['url']
+            chapter_url = job['chapter_url']
+            if not chapter_url and job['manga'].get('chapters'):
+                chapter_url = job['manga']['chapters'][job['chapter']-1]['url']
+            
+            if not chapter_url:
+                self.queue.update_job(job_id, 'failed', error="No chapter URL")
+                return
+            
             images = await self.searcher.get_chapter_images(chapter_url)
             
             if not images:
                 self.queue.update_job(job_id, 'failed', error="No images found")
                 return
             
+            self.queue.update_job(job_id, 'processing', progress=30)
+            
             # Download images
             downloaded = []
             for i, img_url in enumerate(images[:50]):  # Max 50 pages
-                path = self.file_manager.get_temp_path(job_id, f"page_{i}.jpg")
-                await self.downloader.download_image(img_url, path)
-                downloaded.append(path)
+                path = self.file_manager.get_temp_path(job_id, f"page_{i:03d}.jpg")
+                success = await self.file_manager.download_image(img_url, path)
+                if success:
+                    downloaded.append(path)
                 
                 # Update progress
                 if i % 10 == 0:
-                    self.queue.update_job(job_id, 'processing', progress=int((i+1)/len(images)*50))
+                    progress = 30 + int((i+1)/len(images)*40)
+                    self.queue.update_job(job_id, 'processing', progress=progress)
+            
+            if not downloaded:
+                self.queue.update_job(job_id, 'failed', error="Download failed")
+                return
+            
+            self.queue.update_job(job_id, 'processing', progress=70)
             
             # Create PDF
             pdf_path = self.file_manager.get_temp_path(job_id, "output.pdf")
-            await self.pdf_engine.create_pdf(downloaded, pdf_path)
+            success = await self.pdf_engine.create_pdf(downloaded, pdf_path)
             
-            # Send to user
-            # ... (sending code)
+            if not success:
+                self.queue.update_job(job_id, 'failed', error="PDF creation failed")
+                self.file_manager.cleanup(job_id)
+                return
+            
+            self.queue.update_job(job_id, 'processing', progress=90)
+            
+            # Send to user (simplified - actually send through bot)
+            print(f"✅ Job {job_id} completed")
             
             # Cleanup
             self.file_manager.cleanup(job_id)
-            self.queue.update_job(job_id, 'completed')
+            self.queue.update_job(job_id, 'completed', progress=100)
             
         except Exception as e:
+            logger.error(f"Job {job_id} error: {e}")
             self.queue.update_job(job_id, 'failed', error=str(e))
             self.file_manager.cleanup(job_id)
     
@@ -326,29 +366,71 @@ class MangaVerseBot:
                 'cancelled': '🚫'
             }.get(job['status'], '📌')
             
-            text += f"{status_emoji} {job['manga']['title'][:20]} Ch.{job['chapter']}\n"
+            manga_title = job['manga']['title'][:20] if job['manga'].get('title') else "Unknown"
+            text += f"{status_emoji} {manga_title} Ch.{job['chapter']}\n"
             if job['status'] == 'processing' and job.get('progress'):
                 text += f"   Progress: {job['progress']}%\n"
             text += f"   ID: `{job['job_id']}`\n\n"
         
         await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
+    
+    async def queue_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /queue command"""
+        user_id = update.effective_user.id
+        jobs = self.queue.get_user_jobs(user_id)
+        
+        if not jobs:
+            await update.message.reply_text("📪 Queue empty!")
+            return
+        
+        text = "**📊 Your Queue:**\n\n"
+        for job in jobs[-10:]:
+            status_emoji = {
+                'queued': '⏳',
+                'processing': '🔄',
+                'completed': '✅',
+                'failed': '❌',
+                'cancelled': '🚫'
+            }.get(job['status'], '📌')
+            
+            manga_title = job['manga']['title'][:20] if job['manga'].get('title') else "Unknown"
+            text += f"{status_emoji} {manga_title} Ch.{job['chapter']} - {job['status']}\n"
+        
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    
+    async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /cancel command"""
+        user_id = update.effective_user.id
+        self.user_sessions.pop(user_id, None)
+        await update.message.reply_text("✅ Current operation cancelled!")
 
 def main():
     """Main function"""
-    Config.validate()
+    print("🚀 Starting Manga Verse Bot...")
     
+    # Validate config
+    Config.validate()
+    print(f"✅ Bot token loaded: {Config.BOT_TOKEN[:10]}...")
+    
+    # Create bot instance
     bot = MangaVerseBot()
+    
+    # Create application
     app = Application.builder().token(Config.BOT_TOKEN).build()
     
-    # Handlers
+    # Add handlers
     app.add_handler(CommandHandler("start", bot.start))
-    app.add_handler(CommandHandler("queue", bot.show_queue))
-    app.add_handler(CommandHandler("cancel", bot.cancel_job))
+    app.add_handler(CommandHandler("queue", bot.queue_command))
+    app.add_handler(CommandHandler("cancel", bot.cancel_command))
     
+    # Message handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_manga_search))
+    
+    # Callback handler
     app.add_handler(CallbackQueryHandler(bot.handle_callback))
     
-    print("🤖 Bot running... (No Redis, pure RAM)")
+    # Start bot
+    print("🤖 Bot is running! Press Ctrl+C to stop.")
     app.run_polling()
 
 if __name__ == "__main__":
