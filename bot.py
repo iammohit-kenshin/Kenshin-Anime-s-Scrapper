@@ -620,5 +620,26 @@ async def main():
     await app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    print("🚀 Starting Manga Verse Bot...")
+    Config.validate()
+    
+    # Create bot instance
+    bot = MangaVerseBot()
+    
+    # Create application
+    app = Application.builder().token(Config.BOT_TOKEN).build()
+    
+    # Set bot reference
+    bot.set_bot(app.bot)
+    
+    # Add handlers
+    app.add_handler(CommandHandler("start", bot.start))
+    app.add_handler(CommandHandler("queue", bot.queue_command))
+    app.add_handler(CommandHandler("cancel", bot.cancel_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_manga_search))
+    app.add_handler(CallbackQueryHandler(bot.handle_callback))
+    
+    print("🤖 Bot is running! Press Ctrl+C to stop.")
+    
+    # Simple run - no asyncio.run()
+    app.run_polling()  # Ye already blocking call hai
