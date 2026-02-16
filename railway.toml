@@ -1,0 +1,11 @@
+[build]
+command = "pip install -r requirements.txt"
+
+[deploy]
+startCommand = "python bot.py"
+
+[env]
+BOT_TOKEN = "your_token_here"
+REDIS_HOST = "${{ Redis.HOSTNAME }}"
+REDIS_PORT = "${{ Redis.PORT }}"
+REDIS_PASSWORD = "${{ Redis.PASSWORD }}"
