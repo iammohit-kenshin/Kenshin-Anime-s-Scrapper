@@ -1,7 +1,6 @@
 """
-MANGA VERSE BOT - Single File Version
+MANGA VERSE BOT - FIXED VERSION
 10th Class Python Project
-Ethical Purpose Only
 """
 
 import os
@@ -13,10 +12,8 @@ import aiohttp
 import aiofiles
 import img2pdf
 from bs4 import BeautifulSoup
-from PIL import Image
 from typing import List, Dict, Optional
 from collections import defaultdict
-from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
@@ -25,20 +22,20 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
 
-# ==================== CONFIGURATION ====================
+# ==================== CONFIG ====================
 load_dotenv()
 
 class Config:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     TEMP_DIR = "temp"
-    RATE_LIMIT = 5  # requests per minute
-    MAX_CONCURRENT = 3  # max jobs per user
-    MAX_CHAPTERS = 20  # max chapters at once
+    RATE_LIMIT = 10  # Increased from 5 to 10
+    MAX_CONCURRENT = 3
+    MAX_CHAPTERS = 10  # Reduced from 20
     
     @classmethod
     def validate(cls):
         if not cls.BOT_TOKEN:
-            raise ValueError("❌ BOT_TOKEN environment variable not set!")
+            raise ValueError("❌ BOT_TOKEN not set!")
         return True
 
 # ==================== FILE MANAGER ====================
@@ -46,7 +43,6 @@ class FileManager:
     def __init__(self, temp_dir="temp"):
         self.temp_dir = temp_dir
         os.makedirs(temp_dir, exist_ok=True)
-        print(f"📁 Temp directory: {temp_dir}")
     
     def get_temp_path(self, job_id: str, filename: str) -> str:
         job_dir = os.path.join(self.temp_dir, job_id)
@@ -75,143 +71,240 @@ class FileManager:
         except Exception as e:
             print(f"Cleanup error: {e}")
 
-# ==================== MANGA SEARCHER ====================
+# ==================== MANGA SEARCHER - FIXED ====================
 class MangaSearcher:
     def __init__(self):
-        self.sites = {
-            'mangabuddy': {
-                'search_url': 'https://mangabuddy.com/search?q={}',
-                'base_url': 'https://mangabuddy.com'
-            },
-            'elftoon': {
-                'search_url': 'https://elftoon.com/search?q={}',
-                'base_url': 'https://elftoon.com'
-            }
-        }
         self.session = None
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
     
     async def get_session(self):
         if not self.session:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(headers=self.headers)
         return self.session
     
-    async def search_all_sites(self, query: str) -> List[Dict]:
-        tasks = []
-        for site_name, site_config in self.sites.items():
-            tasks.append(self.search_site(site_name, site_config, query))
-        
-        results = await asyncio.gather(*tasks)
-        all_results = []
-        for site_results in results:
-            all_results.extend(site_results)
-        return all_results[:15]
-    
-    async def search_site(self, site_name: str, config: Dict, query: str) -> List[Dict]:
+    async def search_elftoon(self, query: str) -> List[Dict]:
+        """Direct search on Elftoon with multiple methods"""
         try:
             session = await self.get_session()
-            search_url = config['search_url'].format(query.replace(' ', '+'))
+            results = []
             
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            # Method 1: Direct search
+            search_url = f"https://elftoon.com/search?q={query.replace(' ', '+')}"
+            print(f"🔍 Searching: {search_url}")
             
-            async with session.get(search_url, headers=headers, timeout=10) as response:
-                html = await response.text()
-                soup = BeautifulSoup(html, 'html.parser')
+            async with session.get(search_url, timeout=15) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    
+                    # Try different selectors
+                    items = soup.select('.page-item-detail, .manga-item, .c-tabs-item__content')
+                    
+                    for item in items:
+                        title_elem = item.select_one('h3 a, .manga-title a, .post-title a')
+                        if title_elem:
+                            title = title_elem.text.strip()
+                            url = title_elem.get('href')
+                            if url and not url.startswith('http'):
+                                url = 'https://elftoon.com' + url
+                            
+                            results.append({
+                                'title': title,
+                                'url': url,
+                                'site': 'Elftoon'
+                            })
+            
+            # Method 2: If no results, try direct manga page with keywords
+            if not results:
+                # Try to find by partial match
+                base_url = "https://elftoon.com/manga/"
+                keywords = query.lower().replace(' ', '-')
+                possible_url = f"{base_url}{keywords}"
                 
-                results = []
-                
-                if site_name == 'mangabuddy':
+                async with session.get(possible_url, timeout=10) as response:
+                    if response.status == 200:
+                        html = await response.text()
+                        soup = BeautifulSoup(html, 'html.parser')
+                        title_elem = soup.select_one('.post-title h1, .manga-title h1')
+                        if title_elem:
+                            results.append({
+                                'title': title_elem.text.strip(),
+                                'url': possible_url,
+                                'site': 'Elftoon'
+                            })
+            
+            return results[:10]
+            
+        except Exception as e:
+            print(f"Elftoon search error: {e}")
+            return []
+    
+    async def search_mangabuddy(self, query: str) -> List[Dict]:
+        """Search on MangaBuddy"""
+        try:
+            session = await self.get_session()
+            search_url = f"https://mangabuddy.com/search?q={query.replace(' ', '+')}"
+            
+            async with session.get(search_url, timeout=15) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    
+                    results = []
                     items = soup.select('.book-item')
+                    
                     for item in items[:10]:
                         title_elem = item.select_one('.book-title a')
                         if title_elem:
+                            title = title_elem.text.strip()
+                            url = title_elem.get('href')
+                            if url and not url.startswith('http'):
+                                url = 'https://mangabuddy.com' + url
+                            
                             results.append({
-                                'title': title_elem.text.strip(),
-                                'url': title_elem['href'] if title_elem['href'].startswith('http') else config['base_url'] + title_elem['href'],
+                                'title': title,
+                                'url': url,
                                 'site': 'MangaBuddy'
                             })
-                
-                elif site_name == 'elftoon':
-                    items = soup.select('.manga-item, .page-item-detail')
-                    for item in items[:10]:
-                        title_elem = item.select_one('h3 a, .manga-title a')
-                        if title_elem:
-                            results.append({
-                                'title': title_elem.text.strip(),
-                                'url': title_elem['href'] if title_elem['href'].startswith('http') else 'https://elftoon.com' + title_elem['href'],
-                                'site': 'Elftoon'
-                            })
-                
-                return results
+                    
+                    return results
+            return []
         except Exception as e:
-            print(f"Error searching {site_name}: {e}")
+            print(f"Mangabuddy error: {e}")
             return []
     
+    async def search_all_sites(self, query: str) -> List[Dict]:
+        """Search on all sites"""
+        # Clean query
+        query = query.strip()
+        
+        # Search both sites
+        elftoon_results = await self.search_elftoon(query)
+        mangabuddy_results = await self.search_mangabuddy(query)
+        
+        # Combine results
+        all_results = elftoon_results + mangabuddy_results
+        
+        # If no results, try with simplified query (remove special chars)
+        if not all_results:
+            simplified = ''.join(e for e in query if e.isalnum() or e.isspace())
+            if simplified != query:
+                elftoon_results = await self.search_elftoon(simplified)
+                mangabuddy_results = await self.search_mangabuddy(simplified)
+                all_results = elftoon_results + mangabuddy_results
+        
+        return all_results[:15]
+    
     async def get_manga_chapters(self, manga: Dict) -> List[Dict]:
+        """Get all chapters for selected manga"""
         try:
             session = await self.get_session()
-            headers = {'User-Agent': 'Mozilla/5.0'}
+            print(f"📖 Fetching chapters from: {manga['url']}")
             
-            async with session.get(manga['url'], headers=headers, timeout=10) as response:
+            async with session.get(manga['url'], timeout=15) as response:
+                if response.status != 200:
+                    return []
+                
                 html = await response.text()
                 soup = BeautifulSoup(html, 'html.parser')
                 
                 chapters = []
                 
-                if manga['site'] == 'MangaBuddy':
-                    items = soup.select('.chapter-list a, ul.chapter-list li a')
-                    for i, item in enumerate(items[:200], 1):
-                        chapters.append({
-                            'number': i,
-                            'title': item.text.strip() or f"Chapter {i}",
-                            'url': item['href'] if item['href'].startswith('http') else 'https://mangabuddy.com' + item['href']
-                        })
+                if manga['site'] == 'Elftoon':
+                    # Try different selectors for Elftoon
+                    chapter_items = soup.select('.wp-manga-chapter a, .chapter-item a, ul.chapter-list li a')
+                    
+                    for item in chapter_items:
+                        chap_url = item.get('href')
+                        if chap_url:
+                            chap_title = item.text.strip() or "Chapter"
+                            chapters.append({
+                                'title': chap_title,
+                                'url': chap_url if chap_url.startswith('http') else 'https://elftoon.com' + chap_url
+                            })
+                    
+                    # Reverse to get ascending order
+                    chapters = chapters[::-1]
+                    
+                elif manga['site'] == 'MangaBuddy':
+                    chapter_items = soup.select('.chapter-list a, ul.chapter-list li a')
+                    
+                    for item in chapter_items:
+                        chap_url = item.get('href')
+                        if chap_url:
+                            chap_title = item.text.strip() or "Chapter"
+                            chapters.append({
+                                'title': chap_title,
+                                'url': chap_url if chap_url.startswith('http') else 'https://mangabuddy.com' + chap_url
+                            })
                 
-                elif manga['site'] == 'Elftoon':
-                    items = soup.select('.wp-manga-chapter a, .chapter-item a')
-                    for i, item in enumerate(reversed(items[:200]), 1):
-                        chapters.append({
-                            'number': i,
-                            'title': item.text.strip() or f"Chapter {i}",
-                            'url': item['href'] if item['href'].startswith('http') else 'https://elftoon.com' + item['href']
-                        })
+                # Add numbers to chapters
+                for i, chap in enumerate(chapters, 1):
+                    chap['number'] = i
                 
-                return chapters
+                return chapters[:200]  # Max 200 chapters
+                
         except Exception as e:
             print(f"Error getting chapters: {e}")
             return []
     
     async def get_chapter_images(self, chapter_url: str) -> List[str]:
+        """Get all images for a chapter"""
         try:
             session = await self.get_session()
-            headers = {'User-Agent': 'Mozilla/5.0'}
+            print(f"🖼️ Getting images from: {chapter_url}")
             
-            async with session.get(chapter_url, headers=headers, timeout=10) as response:
+            async with session.get(chapter_url, timeout=15) as response:
+                if response.status != 200:
+                    return []
+                
                 html = await response.text()
                 soup = BeautifulSoup(html, 'html.parser')
                 
                 images = []
-                img_selectors = [
+                
+                # Try multiple selectors for images
+                selectors = [
                     '.reading-content img',
                     '.chapter-content img',
                     '.manga-reading img',
                     'img[data-src]',
-                    '.page-break img'
+                    '.page-break img',
+                    '.wp-manga-chapter-img',
+                    'div.reading-content p img',
+                    'img.wp-manga-chapter-img'
                 ]
                 
-                for selector in img_selectors:
+                for selector in selectors:
                     imgs = soup.select(selector)
                     for img in imgs:
                         src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
-                        if src and src not in images:
-                            if src.startswith('http'):
+                        if src:
+                            # Clean URL
+                            if src.startswith('//'):
+                                src = 'https:' + src
+                            elif src.startswith('/'):
+                                src = 'https://elftoon.com' + src
+                            
+                            if src not in images and ('jpg' in src or 'jpeg' in src or 'png' in src or 'webp' in src):
                                 images.append(src)
-                            else:
-                                images.append('https:' + src if src.startswith('//') else src)
                     
                     if images:
                         break
                 
-                return images[:50]
+                # If still no images, try to find any image in the content
+                if not images:
+                    all_imgs = soup.find_all('img')
+                    for img in all_imgs:
+                        src = img.get('src') or img.get('data-src')
+                        if src and 'http' in src and ('jpg' in src or 'jpeg' in src or 'png' in src):
+                            images.append(src)
+                
+                print(f"📸 Found {len(images)} images")
+                return images[:50]  # Max 50 pages
+                
         except Exception as e:
             print(f"Error getting images: {e}")
             return []
@@ -228,7 +321,7 @@ class PDFEngine:
                 f.write(img2pdf.convert(image_paths))
             return True
         except Exception as e:
-            print(f"PDF creation error: {e}")
+            print(f"PDF error: {e}")
             return False
 
 # ==================== SIMPLE QUEUE ====================
@@ -237,11 +330,13 @@ class SimpleQueue:
         self.jobs = {}
         self.user_jobs = defaultdict(list)
         self.processing = set()
-        self.expiry = expiry
     
-    def add_job(self, user_id: int, manga: Dict, chapter: int, chapter_url: str) -> Optional[str]:
-        active = self.get_user_active_count(user_id)
-        if active >= 5:
+    def add_job(self, user_id: int, manga: Dict, chapter: Dict, settings: Dict = None) -> Optional[str]:
+        # Count active jobs
+        active = sum(1 for j in self.user_jobs[user_id] 
+                    if j in self.jobs and self.jobs[j]['status'] in ['queued', 'processing'])
+        
+        if active >= Config.MAX_CONCURRENT:
             return None
         
         job_id = str(uuid.uuid4())[:8]
@@ -251,7 +346,6 @@ class SimpleQueue:
             'user_id': user_id,
             'manga': manga,
             'chapter': chapter,
-            'chapter_url': chapter_url,
             'status': 'queued',
             'created_at': time.time(),
             'updated_at': time.time(),
@@ -267,7 +361,6 @@ class SimpleQueue:
             if job['status'] == 'queued' and job_id not in self.processing:
                 self.processing.add(job_id)
                 job['status'] = 'processing'
-                job['updated_at'] = time.time()
                 return job.copy()
         return None
     
@@ -282,19 +375,11 @@ class SimpleQueue:
                     self.processing.remove(job_id)
     
     def get_user_jobs(self, user_id: int) -> List[Dict]:
-        job_ids = self.user_jobs.get(user_id, [])
-        jobs = []
-        for job_id in job_ids:
-            if job_id in self.jobs:
-                jobs.append(self.jobs[job_id])
-        return jobs
+        return [self.jobs[jid] for jid in self.user_jobs[user_id] if jid in self.jobs]
     
     def get_user_active_count(self, user_id: int) -> int:
-        count = 0
-        for job_id in self.user_jobs.get(user_id, []):
-            if job_id in self.jobs and self.jobs[job_id]['status'] in ['queued', 'processing']:
-                count += 1
-        return count
+        return sum(1 for j in self.user_jobs[user_id] 
+                  if j in self.jobs and self.jobs[j]['status'] in ['queued', 'processing'])
 
 # ==================== MAIN BOT ====================
 class MangaVerseBot:
@@ -306,12 +391,12 @@ class MangaVerseBot:
         self.file_manager = FileManager()
         self.user_sessions = {}
         self.last_request = {}
-        print("✅ Bot initialized successfully!")
+        print("✅ Bot initialized!")
     
     def check_rate_limit(self, user_id: int) -> bool:
         now = time.time()
         if user_id in self.last_request:
-            if now - self.last_request[user_id] < (60 / Config.RATE_LIMIT):
+            if now - self.last_request[user_id] < 2:  # 2 seconds between requests
                 return False
         self.last_request[user_id] = now
         return True
@@ -322,10 +407,10 @@ class MangaVerseBot:
             f"👋 **Namaste {user.first_name}!**\n\n"
             f"Main Manga Verse Bot hoon. Bas manga ka naam bhejo, "
             f"main dhundh kar PDF bhej dunga!\n\n"
-            f"**Example:** 'One Piece' ya 'Solo Leveling'\n\n"
+            f"**Example:** 'Global Superpowers' ya 'Solo Leveling'\n\n"
             f"**Commands:**\n"
-            f"/queue - Check queue status\n"
-            f"/cancel - Cancel current operation",
+            f"/queue - Check queue\n"
+            f"/cancel - Cancel current",
             parse_mode=ParseMode.MARKDOWN
         )
     
@@ -333,7 +418,7 @@ class MangaVerseBot:
         user_id = update.effective_user.id
         
         if not self.check_rate_limit(user_id):
-            await update.message.reply_text("⏳ Thoda ruko... Request limit hit!")
+            await update.message.reply_text("⏳ Thoda ruko... 2 second wait karo!")
             return
         
         query = update.message.text
@@ -346,8 +431,24 @@ class MangaVerseBot:
             results = await self.searcher.search_all_sites(query)
             
             if not results:
-                await status_msg.edit_text("❌ Kuch nahi mila! Different spelling try karo.")
-                return
+                # Try with direct URL
+                if 'elftoon.com' in query or 'mangabuddy.com' in query:
+                    # User ne direct URL diya hai
+                    site = 'Elftoon' if 'elftoon' in query else 'MangaBuddy'
+                    results = [{
+                        'title': 'Direct Link',
+                        'url': query,
+                        'site': site
+                    }]
+                else:
+                    await status_msg.edit_text(
+                        "❌ Kuch nahi mila!\n\n"
+                        "Tips:\n"
+                        "• Exact naam likho\n"
+                        "• Direct URL bhejo\n"
+                        "• Different spelling try karo"
+                    )
+                    return
             
             session_id = str(uuid.uuid4())[:8]
             self.user_sessions[user_id] = {
@@ -359,10 +460,13 @@ class MangaVerseBot:
             keyboard = []
             for i, manga in enumerate(results[:10]):
                 title = manga['title'][:35] + "..." if len(manga['title']) > 35 else manga['title']
-                keyboard.append([InlineKeyboardButton(f"{i+1}. {title} ({manga['site']})", callback_data=f"manga_{i}")])
+                keyboard.append([InlineKeyboardButton(f"{i+1}. {title}", callback_data=f"manga_{i}")])
             
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await status_msg.edit_text(f"📚 Found {len(results)} results:\nSelect one:", reply_markup=reply_markup)
+            await status_msg.edit_text(
+                f"📚 Found {len(results)} results:\nSelect one:",
+                reply_markup=reply_markup
+            )
             
         except Exception as e:
             await status_msg.edit_text(f"❌ Error: {str(e)}")
@@ -390,32 +494,34 @@ class MangaVerseBot:
             chapters = await self.searcher.get_manga_chapters(selected)
             
             if not chapters:
-                await query.edit_message_text("❌ No chapters found!")
+                await query.edit_message_text(
+                    f"❌ No chapters found!\n\n"
+                    f"URL: {selected['url']}\n"
+                    f"Site: {selected['site']}"
+                )
                 return
             
             session['chapters'] = chapters
-            session['total'] = len(chapters)
             
-            # Show chapter buttons
+            # Show first 10 chapters
             keyboard = []
             row = []
-            for i in range(1, min(6, session['total']+1)):
-                row.append(InlineKeyboardButton(str(i), callback_data=f"chap_{i}"))
+            for i, chap in enumerate(chapters[:5], 1):
+                row.append(InlineKeyboardButton(str(i), callback_data=f"chap_{i-1}"))
             keyboard.append(row)
             
-            if session['total'] > 5:
+            if len(chapters) > 5:
                 row2 = []
-                for i in range(6, min(11, session['total']+1)):
-                    row2.append(InlineKeyboardButton(str(i), callback_data=f"chap_{i}"))
+                for i, chap in enumerate(chapters[5:10], 6):
+                    row2.append(InlineKeyboardButton(str(i), callback_data=f"chap_{i-1}"))
                 keyboard.append(row2)
             
             keyboard.append([InlineKeyboardButton("📦 Download All", callback_data="chap_all")])
-            keyboard.append([InlineKeyboardButton("📊 Queue Status", callback_data="queue_status"),
-                           InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+            keyboard.append([InlineKeyboardButton("📊 Queue Status", callback_data="queue_status")])
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
-                f"📚 *{session['selected']['title']}*\nTotal: {session['total']} chapters\n\nSelect chapter:",
+                f"📚 *{selected['title']}*\nTotal: {len(chapters)} chapters\n\nSelect chapter:",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=reply_markup
             )
@@ -424,8 +530,8 @@ class MangaVerseBot:
             if data == 'chap_all':
                 await self.queue_all(query, session)
             else:
-                chap_num = int(data.split('_')[1])
-                await self.add_to_queue(query, session, chap_num)
+                chap_index = int(data.split('_')[1])
+                await self.add_to_queue(query, session, chap_index)
         
         elif data == 'queue_status':
             jobs = self.queue.get_user_jobs(user_id)
@@ -434,31 +540,32 @@ class MangaVerseBot:
                 return
             
             text = "**📊 Your Queue:**\n\n"
-            for job in jobs[-10:]:
-                status_emoji = {'queued': '⏳', 'processing': '🔄', 'completed': '✅', 'failed': '❌'}.get(job['status'], '📌')
-                text += f"{status_emoji} {job['manga']['title'][:20]} Ch.{job['chapter']} - {job['status']}\n"
+            for job in jobs[-5:]:
+                emoji = {'queued': '⏳', 'processing': '🔄', 'completed': '✅', 'failed': '❌'}.get(job['status'], '📌')
+                text += f"{emoji} Ch.{job['chapter']['number']} - {job['status']}\n"
+                if job['status'] == 'processing' and job.get('progress'):
+                    text += f"   Progress: {job['progress']}%\n"
+            
             await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
-        
-        elif data == 'cancel':
-            self.user_sessions.pop(user_id, None)
-            await query.edit_message_text("✅ Cancelled! Send manga name to start fresh.")
     
-    async def add_to_queue(self, query, session, chapter_num):
+    async def add_to_queue(self, query, session, chap_index):
         user_id = query.from_user.id
+        chapter = session['chapters'][chap_index]
         
         if self.queue.get_user_active_count(user_id) >= Config.MAX_CONCURRENT:
-            await query.edit_message_text(f"⚠️ Already {Config.MAX_CONCURRENT} jobs running! Wait for some to complete.")
+            await query.edit_message_text(f"⚠️ Already {Config.MAX_CONCURRENT} jobs running!")
             return
         
-        chapter_url = session['chapters'][chapter_num-1]['url']
-        job_id = self.queue.add_job(user_id, session['selected'], chapter_num, chapter_url)
+        job_id = self.queue.add_job(user_id, session['selected'], chapter)
         
         if not job_id:
             await query.edit_message_text("❌ Too many jobs!")
             return
         
         await query.edit_message_text(
-            f"✅ Chapter {chapter_num} added to queue!\nJob ID: `{job_id}`\n\nUse /queue to check status",
+            f"✅ Chapter {chapter['number']} added to queue!\n"
+            f"Job ID: `{job_id}`\n\n"
+            f"Use /queue to check status",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -466,29 +573,27 @@ class MangaVerseBot:
     
     async def queue_all(self, query, session):
         user_id = query.from_user.id
-        total = session['total']
+        chapters = session['chapters']
         
-        if total > Config.MAX_CHAPTERS:
+        if len(chapters) > Config.MAX_CHAPTERS:
             await query.edit_message_text(f"⚠️ Max {Config.MAX_CHAPTERS} chapters at a time!")
             return
         
-        status_msg = await query.edit_message_text(f"📦 Adding {total} chapters to queue...")
+        await query.edit_message_text(f"📦 Adding {len(chapters)} chapters to queue...")
         
         added = 0
-        for i in range(1, total + 1):
+        for chapter in chapters[:Config.MAX_CHAPTERS]:
             if self.queue.get_user_active_count(user_id) >= Config.MAX_CONCURRENT:
                 break
             
-            chapter_url = session['chapters'][i-1]['url']
-            job_id = self.queue.add_job(user_id, session['selected'], i, chapter_url)
-            
+            job_id = self.queue.add_job(user_id, session['selected'], chapter)
             if job_id:
                 added += 1
                 asyncio.create_task(self.process_queue())
             
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
         
-        await status_msg.edit_text(f"✅ {added}/{total} chapters queued!\nUse /queue to check status")
+        await query.edit_message_text(f"✅ {added} chapters queued!\nUse /queue to check status")
     
     async def process_queue(self):
         while True:
@@ -503,53 +608,56 @@ class MangaVerseBot:
     
     async def process_job(self, job):
         job_id = job['job_id']
-        user_id = job['user_id']
         
         try:
             self.queue.update_job(job_id, 'processing', progress=10)
             
-            images = await self.searcher.get_chapter_images(job['chapter_url'])
+            # Get images
+            images = await self.searcher.get_chapter_images(job['chapter']['url'])
             
             if not images:
-                self.queue.update_job(job_id, 'failed', error="No images")
+                self.queue.update_job(job_id, 'failed')
                 return
             
             self.queue.update_job(job_id, 'processing', progress=30)
             
+            # Download images
             downloaded = []
-            for i, img_url in enumerate(images[:50]):
+            for i, img_url in enumerate(images[:30]):  # Max 30 pages for speed
                 path = self.file_manager.get_temp_path(job_id, f"page_{i:03d}.jpg")
                 success = await self.file_manager.download_image(img_url, path)
                 if success:
                     downloaded.append(path)
                 
-                if i % 10 == 0:
+                if i % 5 == 0:
                     progress = 30 + int((i+1)/len(images)*40)
                     self.queue.update_job(job_id, 'processing', progress=progress)
             
             if not downloaded:
-                self.queue.update_job(job_id, 'failed', error="Download failed")
+                self.queue.update_job(job_id, 'failed')
                 self.file_manager.cleanup(job_id)
                 return
             
             self.queue.update_job(job_id, 'processing', progress=70)
             
+            # Create PDF
             pdf_path = self.file_manager.get_temp_path(job_id, "output.pdf")
             success = await self.pdf_engine.create_pdf(downloaded, pdf_path)
             
             if not success:
-                self.queue.update_job(job_id, 'failed', error="PDF failed")
+                self.queue.update_job(job_id, 'failed')
                 self.file_manager.cleanup(job_id)
                 return
             
             self.queue.update_job(job_id, 'completed', progress=100)
             print(f"✅ Job {job_id} completed")
             
-            # Cleanup after success
+            # Cleanup
             self.file_manager.cleanup(job_id)
             
         except Exception as e:
-            self.queue.update_job(job_id, 'failed', error=str(e))
+            print(f"Job error: {e}")
+            self.queue.update_job(job_id, 'failed')
             self.file_manager.cleanup(job_id)
     
     async def queue_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -561,23 +669,21 @@ class MangaVerseBot:
             return
         
         text = "**📊 Your Queue:**\n\n"
-        for job in jobs[-10:]:
-            status_emoji = {'queued': '⏳', 'processing': '🔄', 'completed': '✅', 'failed': '❌'}.get(job['status'], '📌')
-            text += f"{status_emoji} {job['manga']['title'][:20]} Ch.{job['chapter']} - {job['status']}\n"
+        for job in jobs[-5:]:
+            emoji = {'queued': '⏳', 'processing': '🔄', 'completed': '✅', 'failed': '❌'}.get(job['status'], '📌')
+            text += f"{emoji} Ch.{job['chapter']['number']} - {job['status']}\n"
         
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
     
     async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         self.user_sessions.pop(user_id, None)
-        await update.message.reply_text("✅ Current operation cancelled!")
+        await update.message.reply_text("✅ Cancelled!")
 
-# ==================== MAIN FUNCTION ====================
+# ==================== MAIN ====================
 def main():
     print("🚀 Starting Manga Verse Bot...")
-    
     Config.validate()
-    print(f"✅ Bot token: {Config.BOT_TOKEN[:10]}...")
     
     bot = MangaVerseBot()
     app = Application.builder().token(Config.BOT_TOKEN).build()
