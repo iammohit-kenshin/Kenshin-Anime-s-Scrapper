@@ -3,5 +3,3 @@ tgcrypto
 requests
 beautifulsoup4
 img2pdf
-shutil
-os
